@@ -1,0 +1,396 @@
+---
+title: "Final"
+author: "Vincent Khao"
+date: "May 2026"
+output:
+  html_notebook:
+    number_sections: true
+    theme: readable
+    highlight: pygments
+    toc: true
+    toc_float:
+      collapsed: true
+  html_document:
+    toc: true
+    df_print: paged
+---
+
+# Dependencies {-}
+
+```{r dependencies, message=FALSE, warning=FALSE}
+library(dplyr)      # data manipulation and bind_rows()
+library(ggplot2)    # plotting simulation results
+library(grf)        # generalized random forests / AIPW
+library(patchwork)  # combine ggplots
+```
+
+# Question 1
+
+Suppose an interviewer asks you the benefit of "causal ML" methods. How do you respond? What are the benefits and costs compared to "traditional" methods like generalized linear models (GLM)? What are situations where GLMs cannot reliably estimate treatment effects?
+
+[Causal machine learning methods are useful when relationships in the data are complicated. Traditional generalized linear models (GLMs) work well when the researcher correctly specifies the model, usually with straight-lined or simple relationships. But in real life, treatment effects and confounding are often nonlinear and involve many interacting variables, which can cause GLMs to become biased. 
+
+Methods like AIPW and causal forests are flexible because machine learning can learn complicated patterns automatically. AIPW is also "doublly robust", meaning the estimate can still work well if either the treatment model or outcome model is estimated correctly.
+
+A tradeoff is that causal ML methods are harder to interpret and require more computational power. 
+
+GLM is like drawing a straight line through the data, while Causal ML is like using a flexy curve that adapts to different types of data. In a simple world, straight line works great, but if people and data behave differently, machine learning can capture those patterns better.] 
+
+# Question 2
+
+You are a data scientist at a firm, and your team is responsible for pricing. You have a dataset of observed prices and quantities purchased. Your manager asks you to estimate the demand curve using machine learning. What problems might you encounter?
+
+
+[A major problem is endogeneity. Prices are not randoml assigned, so prices are often related to things we cannot directly observe, like changes in demand, promotions, or consumer preferences. Because of this, a machine learning model may learn correlations instead of the true causal effect of price on quantity demanded.
+
+This creates biased estimates of the demand curve due to confounding, simultaneity, and selection bias. Estimating demand requires causal identification, not just prediction accuracy. 
+
+So the problem is that correlation is not the same as causation. To estimate demand correctly, we need methods that separate the true effect of price from outside factors affecting both price and sales.]  
+
+
+# Question 3
+
+You're given data from an experiment, `experiment.csv`. Can you estimate the treatment effect with a linear model? Why or why not?
+
+```{r q3}
+# Load the experiment data
+experiment = read.csv("experiment.csv")
+lm(Y ~ W + X1 + X2 + X3, data = experiment)
+```
+
+[ Yes I can estimate the treatment effect with a linear model because in a randomized experiment, the treatment W is independent of the covariates X. However, if the true relationship is non-linear or includes interactions, OLS may be inefficient or biased estimator of the ATE if the functional form is not specified. 
+
+Yes I can estimate the treatment effect with a linear model because the data comes from a randomized experiment. Randomization means the treatment assignment W is independent of the covariates X, so the coefficient on treatment consistently estimates the average treatment effect (ATE).
+
+However if the true relationship between the covariates and outcome is highly nolinear or contains complex interactions, OLS may become inefficient because the model is misspecified. In those settings, causal ML methods like AIPW with causal forests can estimate treatment effects more flexibly.
+
+Because the experiment randomly assigned treatment, it is similar to flipping a fair coin. That makes the treatment and control groups comparable, so a linear model can estimate the average effect fairly well. 
+
+But if the real world relationships are very complicated, a simple straight lined model may miss important patterns, while machine leanring can adapt more easily to those complex relationships]
+
+# Question 4
+
+Estimate the treatment effect in `experiment.csv`. Check overlap to ensure AIPW is valid by plotting a histogram. Then calculate the 95\% confidence interval and the p-value.
+
+```{r q4}
+# data
+Y = experiment$Y
+W = experiment$W
+X = experiment %>%
+  select(X1, X2, X3) %>%
+  as.matrix()
+
+# overlap
+W.hat = regression_forest(X, W)
+propensity_score = predict(W.hat)$predictions
+hist(propensity_score)
+
+# causal forest/trimming
+cf = causal_forest(X, Y, W)
+cf$W.hat = pmin(pmax(cf$W.hat, 0.01),0.99)
+
+ate = average_treatment_effect(cf, method = "AIPW")
+print(ate)
+
+tau_hat = ate[1]
+se = ate[2]
+
+# 95% confidence interval
+ci = c(tau_hat - 1.96 * se, tau_hat + 1.96 * se)
+
+# p-value
+t_stat = tau_hat / se
+p_value = 2 * (1 - pnorm(abs(t_stat)))
+
+# results
+tau_hat
+ci
+p_value
+
+```
+
+
+# Question 5
+
+In the next few questions you will build a Monte Carlo simulator to compare machine learning methods to linear models on a simulated experiment.
+
+To begin, write a function called `simulate_experiment`. It takes an argument called `n`, the sample size, which defaults to `1e5`; an argument called `tau`, the "true" treatment effect in the population (defaults to 3); and an argument called `linear` (defaults to `TRUE`) which activates an if-else condition that simulates either a linear or non-linear data-generating process.
+
+If the data-generating process is linear, then:
+
+$$
+X_{n \times 3} \sim N(0,1)
+$$
+
+$$
+\varepsilon \sim N(0,1)
+$$
+
+$$
+P(W = 1 \mid X) = \frac{1}{1 + \exp(x_3)}
+$$
+
+$$
+Y = X_1 + X_2 + X_3 + \tau W + \varepsilon
+$$
+
+And if it is non-linear, then:
+
+$$
+X_{n \times 3} \sim N(0,1)
+$$
+
+$$
+\varepsilon \sim N(0,1)
+$$
+
+$$
+P(W = 1 \mid X) = \frac{1 + \sin(x_1)\cos(x_2)}{2}
+$$
+
+$$
+Y = X_1^3 + 3\sin(X_2) + \max[X_3, 0] + X_1X_2 + \tau W + \varepsilon
+$$
+
+Your function should return a `data.frame` object with the following columns: `y`, `X1`, `X2`, `X3`, `w`, `tau`, and `linear` (`TRUE`/`FALSE`).
+
+```{r q5}
+simulate_experiment = function(n = 1e5, tau = 3, linear = TRUE) {
+  X1 = rnorm(n)
+  X2 = rnorm(n)
+  X3 = rnorm(n)
+  
+  if(linear == TRUE) {
+    propensity_score = plogis(0.5 * X1 + 0.5 * X2)
+    W = rbinom(n, 1, propensity_score)
+    Y = tau * W + X1 + X2 + X3 + rnorm(n)
+  } else {
+    propensity_score = plogis(sin(X1) + X2^2)
+    W = rbinom(n, 1, propensity_score)
+    Y = tau * W + X1^2 + sin(X2) + X1 * X3 + rnorm(n)}
+  data.frame(Y, W, X1, X2, X3, tau, linear)
+}
+```
+
+# Question 6
+
+Next, write a function called `simulate_ate`. It has an argument `sample_data`, a data.frame with the same columns as the output of `simulate_experiment`; and an argument `method` that activates an if--else condition that either uses OLS to estimate $\tau$ or AIPW (via `grf`). Your function should return $\hat{\tau}$ and nothing else.
+
+```{r q6}
+simulate_ate = function(sample_data, method = "ols") {
+
+  if(method == "ols") {
+    model = lm(Y ~ W + X1 + X2 + X3, data = sample_data)
+    coef(model)["W"]
+  } else if(method == "aipw") {
+    
+    Y = sample_data$Y
+    W = sample_data$W
+    X = sample_data %>%
+      select(X1, X2, X3) %>%
+      as.matrix()
+
+    cf = causal_forest(X, Y, W)
+
+    cf$W.hat = pmin(pmax(cf$W.hat, 0.01), 0.99)
+    average_treatment_effect(cf, method = "AIPW")[1]
+  }
+}
+```
+
+# Question 7
+
+Finally, write a function called `monte_carlo_ate`. It takes three arguments:
+
+- `data`: the output of `simulate_experiment`
+- `sample_size`: a vector of sample sizes that defaults to `c(100, 500, 1000, 2000)`
+- `n_sims`: the number of simulations to run for each sample size (defaults to `1e2`)
+- `method`: a character `'ols'` or `'aipw'` this passed to the `method` argument in `simulate_ate`
+
+The function loops over `sample_size` using a list. It draws a random sample from the data according to the value of `sample_size` and passes the random sample to the `sample_data` argument in `simulate_ate()`. It then loops over `n_sims` using a numeric vector that collects the estimates of $\tau$ from `simulate_ate()`.
+
+At the end of each iteration on `sample_size`, create a `data.frame` with the following columns:
+
+- `sample_size`: the sample size
+- `tau_hat`: the estimates of $\tau$ for that sample size
+- `tau`: the true treatment effect
+- `linear`: `TRUE`/`FALSE`
+- `method`: "ols" or "machine_learning"
+
+At the end of all loops, bind the list of data.frames together and return it.
+
+```{r q7}
+# monte carlo
+monte_carlo_ate = function(data,
+                           sample_size = c(100, 500, 1000, 2000),
+                           n_sims = 1e2,
+                           method = "ols") {
+
+  results = vector("list", length(sample_size))
+  
+  for(i in seq_along(sample_size)) {
+    n = sample_size[i]
+    tau_hat = vector(length = n_sims)
+    
+    for(j in 1:n_sims) {
+      sample_data = data %>%
+        slice_sample(n = n)
+      tau_hat[j] = simulate_ate(sample_data,
+                                method = method)
+    }
+
+    results[[i]] = data.frame(
+      sample_size = n,
+      tau_hat = tau_hat,
+      tau = unique(data$tau),
+      linear = unique(data$linear),
+      method = method
+    )
+  }
+
+  bind_rows(results)
+}
+```
+
+# Question 8
+
+Run `monte_carlo_ate` for a linear and non-linear process and use OLS to estimate $\tau$. Use default parameters for all the functions. Plot the results with a boxplot.
+
+```{r q8}
+#ols linear
+linear_data = simulate_experiment(linear = TRUE)
+linear_ols = monte_carlo_ate(linear_data, method = "ols")
+
+#ols nonlinear
+nonlinear_data = simulate_experiment(linear = FALSE)
+nonlinear_ols = monte_carlo_ate(nonlinear_data, method = "ols")
+
+
+#combine
+linear_ols$dgp = "Linear"
+nonlinear_ols$dgp = "Nonlinear"
+
+ols_results = bind_rows(linear_ols, nonlinear_ols)
+
+#plot
+ggplot(ols_results, 
+       aes(x = factor(sample_size), 
+           y = tau_hat)) +
+  geom_boxplot(fill = "red") +
+  facet_wrap(~dgp) +
+  geom_hline(yintercept = 3,
+             color = "blue") +
+  labs(x = "Sample Size",
+       y = "Tau Hat")
+```
+
+
+# Question 9
+
+Run `monte_carlo_ate` for a linear and non-linear process and use machine learning to estimate $\tau$. Use default parameters for all the functions. Plot the results with a boxplot.
+
+```{r q9}
+#aipw linear 
+linear_ml = monte_carlo_ate(linear_data, method = "aipw")
+
+#aipw nonlinear 
+nonlinear_ml = monte_carlo_ate(nonlinear_data, method = "aipw")
+
+#combined
+linear_ml$dgp = "Linear"
+
+nonlinear_ml$dgp = "Nonlinear"
+
+ml_results = bind_rows(linear_ml, nonlinear_ml)
+
+#plot 
+
+ggplot(ml_results,
+       aes(x = factor(sample_size),
+           y = tau_hat)) +
+  geom_boxplot(fill = "orange") +
+  facet_wrap(~dgp) +
+  geom_hline(yintercept = 3,
+             color = "red") +
+  labs(x = "Sample Size",
+       y = "Tau Hat")
+```
+
+
+# Question 10
+
+Compare your results. Focus on consistency (i.e., $\hat{\tau} = \tau$). How does this simulation exercise highlight the strengths and weaknesses of parametric and non-parametric methods?
+
+[OLS works well when the relationship in the data is simple and mostly in a straight line pattern, because that is what OLS is designed for. But when the data becomes more complicated with curves, interactions, or nonlinear relationships, OLS can make systematic mistakes because it cannot adapt to those patterns very well. 
+
+AIPW with causal forests performs better in complicated settings because machine learning can flexibly learn more complex relationships in the data. It is also doubly robust meaning it can still work even if part of the model is estimated imperfectly. 
+
+As the sample size gets larger, both methods improve and become less noisy, but AIPW stays closer to the true treatment effect when the underlying relationships are complex.]
+
+# Question 11
+
+On the `learning_mindset.csv` data use `grf` to estimate the average treatment effect with AIPW. Then explore heterogeneous treatment effects. What do you find?
+
+```{r q11}
+# Load the learning mindset data
+learning_mindset = read.csv("learning_mindset.csv")
+
+# outcome / treatment
+Y = learning_mindset$achievement_score
+W = learning_mindset$intervention
+
+# covariates
+X = learning_mindset %>%
+  select(-achievement_score,-intervention) %>%
+  as.matrix()
+
+# causal forest
+cf = causal_forest(X, Y, W)
+
+# aipw estimate 
+average_treatment_effect(cf,method = "AIPW")
+
+# cate estimates 
+
+cate_hat = predict(cf)$predictions
+
+cate_df = data.frame(cate_hat)
+
+# plot 
+
+ggplot(cate_df,
+       aes(x = cate_hat)) +
+  geom_histogram(bins = 100,
+                 fill = "blue")
+
+```
+
+[The AIPW estimate suggests the intervention had a positive average treatment effect on achievement scores. However, the distribution of the CATE estimate shows heterogeneity, meaning the treatment effect varies across students. Some students benefit considerably more than others, suggesting the intervention may be effective for particular covariate profiles rather than uniformly effective across the population. 
+
+The AIPW estimate suggests the mindset intervention had a positive effect on student achievement scores on average. In other words, students who received the intervention generally performed better than students who didn't.
+
+However, the CATE estimates show heterogenous treatment effects, meaning the intervention did not help every student equally. Some students benefited a lot, while others experienced only small improvements. This suggests the effectiveness of the intervention depends on student characteristics captured in the covariates.
+
+Imagine two students: 
+ - one student already feels confident and motivated
+ - another believes they are bad at learning
+The mindset intervention might not change much for the confident student, but it could help the second student much more by changing how they think about challenges and failure.
+
+Main finding:
+ - intervention helped students overall
+ - especially helpful for certain types of students rather than everyone equally
+ 
+Conclusion: Causal machine learning is useful because instead of only estimating one average effect for everyone, it helps identify which groups benefit the most from a treatment or program.]
+
+# Question 12
+
+What stuck with you this class?
+
+[This was said sometime at the beginning of the half semester and I am going to roughly quote it: "How can we use Machine Learning in order to make good interventions and make the world a better place?"
+
+That phrase stuck with me the entire time, and made me consider-that I am not an amazing programmer, but I can build my knowledge around the tools used in the field to create, determine and understand outcomes that can possible make an impact. Because what matters is not really knowing the tool, but knowing how to construct what I know and have to get an answer.
+
+And that takes me to the next item to take away from this class: prediction is not causation, and getting causal effects right requires thinking carefully about the data generating process, not just running a regression. 
+
+All the things we've learned: propensity scores, outcome models, random forests, AIPW, doubly robust estimation, croissants all try to answer the core question: 
+What would have happened to the same unit under different treatment states? This is the causal framework.]
